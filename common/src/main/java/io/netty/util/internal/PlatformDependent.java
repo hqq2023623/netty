@@ -99,6 +99,7 @@ public final class PlatformDependent {
     private static final AtomicLong DIRECT_MEMORY_COUNTER;
     private static final long DIRECT_MEMORY_LIMIT;
     private static final ThreadLocalRandomProvider RANDOM_PROVIDER;
+    private static final Cleaner CLEANER;
 
     public static final boolean BIG_ENDIAN_NATIVE_ORDER = ByteOrder.nativeOrder() == ByteOrder.BIG_ENDIAN;
 
@@ -158,6 +159,19 @@ public final class PlatformDependent {
         logger.debug("io.netty.maxDirectMemory: {} bytes", maxDirectMemory);
 
         MAYBE_SUPER_USER = maybeSuperUser0();
+
+        if (hasUnsafe() && !isAndroid()) {
+            // only direct to method if we are not running on android.
+            // See https://github.com/netty/netty/issues/2604
+            CLEANER = javaVersion() >= 9 ? new CleanerJava9() : new Cleaner0();
+        } else {
+            CLEANER = new Cleaner() {
+                @Override
+                public void freeDirectBuffer(ByteBuffer buffer) {
+                    // NOOP
+                }
+            };
+        }
     }
 
     /**
@@ -322,15 +336,11 @@ public final class PlatformDependent {
     }
 
     /**
-     * Try to deallocate the specified direct {@link ByteBuffer}.  Please note this method does nothing if
+     * Try to deallocate the specified direct {@link ByteBuffer}. Please note this method does nothing if
      * the current platform does not support this operation or the specified buffer is not a direct buffer.
      */
     public static void freeDirectBuffer(ByteBuffer buffer) {
-        if (hasUnsafe() && !isAndroid()) {
-            // only direct to method if we are not running on android.
-            // See https://github.com/netty/netty/issues/2604
-            PlatformDependent0.freeDirectBuffer(buffer);
-        }
+        CLEANER.freeDirectBuffer(buffer);
     }
 
     public static long directBufferAddress(ByteBuffer buffer) {

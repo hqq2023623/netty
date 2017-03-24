@@ -36,10 +36,11 @@ import static io.netty.util.internal.ObjectUtil.checkNotNull;
 final class PlatformDependent0 {
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(PlatformDependent0.class);
-    private static final Unsafe UNSAFE;
     private static final long ADDRESS_FIELD_OFFSET;
     private static final long BYTE_ARRAY_BASE_OFFSET;
     private static final Constructor<?> DIRECT_BUFFER_CONSTRUCTOR;
+
+    static final Unsafe UNSAFE;
 
     // constants borrowed from murmur3
     static final int HASH_CODE_ASCII_SEED = 0xc2b2ae35;
@@ -281,10 +282,6 @@ final class PlatformDependent0 {
 
         logger.debug("java.nio.DirectByteBuffer.<init>(long, int): {}",
                 DIRECT_BUFFER_CONSTRUCTOR != null ? "available" : "unavailable");
-
-        if (direct != null) {
-            freeDirectBuffer(direct);
-        }
     }
 
     static boolean isUnaligned() {
@@ -329,12 +326,6 @@ final class PlatformDependent0 {
             }
             throw new Error(cause);
         }
-    }
-
-    static void freeDirectBuffer(ByteBuffer buffer) {
-        // Delegate to other class to not break on android
-        // See https://github.com/netty/netty/issues/2604
-        Cleaner0.freeDirectBuffer(buffer);
     }
 
     static long directBufferAddress(ByteBuffer buffer) {
