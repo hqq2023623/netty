@@ -40,6 +40,7 @@ final class PlatformDependent0 {
     private static final long ADDRESS_FIELD_OFFSET;
     private static final long BYTE_ARRAY_BASE_OFFSET;
     private static final Constructor<?> DIRECT_BUFFER_CONSTRUCTOR;
+    private static final Method ALLOCATE_ARRAY_METHOD;
 
     // constants borrowed from murmur3
     static final int HASH_CODE_ASCII_SEED = 0xc2b2ae35;
@@ -57,6 +58,7 @@ final class PlatformDependent0 {
     static {
         final ByteBuffer direct;
         Field addressField = null;
+        Method allocateArrayMethod;
         Unsafe unsafe;
 
         if (PlatformDependent.isExplicitNoUnsafe()) {
@@ -105,7 +107,7 @@ final class PlatformDependent0 {
             // http://www.mail-archive.com/jdk6-dev@openjdk.java.net/msg00698.html
             if (unsafe != null) {
                 final Unsafe finalUnsafe = unsafe;
-                final Object maybeException = AccessController.doPrivileged(new PrivilegedAction<Object>() {
+                Object maybeException = AccessController.doPrivileged(new PrivilegedAction<Object>() {
                     @Override
                     public Object run() {
                         try {
@@ -185,6 +187,7 @@ final class PlatformDependent0 {
             BYTE_ARRAY_BASE_OFFSET = -1;
             UNALIGNED = false;
             DIRECT_BUFFER_CONSTRUCTOR = null;
+            ALLOCATE_ARRAY_METHOD = null;
         } else {
             Constructor<?> directBufferConstructor;
             long address = -1;
@@ -235,7 +238,6 @@ final class PlatformDependent0 {
                 }
             }
             DIRECT_BUFFER_CONSTRUCTOR = directBufferConstructor;
-
             ADDRESS_FIELD_OFFSET = objectFieldOffset(addressField);
             BYTE_ARRAY_BASE_OFFSET = UNSAFE.arrayBaseOffset(byte[].class);
             boolean unaligned;
@@ -277,7 +279,39 @@ final class PlatformDependent0 {
             }
 
             UNALIGNED = unaligned;
+
+            Object maybeException = AccessController.doPrivileged(new PrivilegedAction<Object>() {
+                @Override
+                public Object run() {
+                    try {
+                        return Unsafe.class.getDeclaredMethod(
+                                "allocateUninitializedArray", Class.class, int.class);
+                    } catch (NoSuchMethodException e) {
+                        return e;
+                    } catch (SecurityException e) {
+                        return e;
+                    }
+                }
+            });
+
+            if (maybeException instanceof Method) {
+                try {
+                    allocateArrayMethod = (Method) maybeException;
+                    byte[] bytes = (byte[]) allocateArrayMethod.invoke(unsafe, byte[].class, 8);
+                    assert bytes.length == 8;
+                } catch (IllegalAccessException e) {
+                    allocateArrayMethod = null;
+                } catch (InvocationTargetException e) {
+                    allocateArrayMethod = null;
+                }
+            } else {
+                allocateArrayMethod = null;
+            }
+            ALLOCATE_ARRAY_METHOD = allocateArrayMethod;
         }
+
+        logger.debug("sun.misc.Unsafe.allocateUninitializedArray: {}",
+                ALLOCATE_ARRAY_METHOD != null ? "available" : "unavailable");
 
         logger.debug("java.nio.DirectByteBuffer.<init>(long, int): {}",
                 DIRECT_BUFFER_CONSTRUCTOR != null ? "available" : "unavailable");
@@ -314,6 +348,19 @@ final class PlatformDependent0 {
 
     static ByteBuffer allocateDirectNoCleaner(int capacity) {
         return newDirectBuffer(UNSAFE.allocateMemory(capacity), capacity);
+    }
+
+    static byte[] allocateUninitializedArray(int size) {
+        if (ALLOCATE_ARRAY_METHOD == null) {
+            return new byte[size];
+        }
+        try {
+            return (byte[]) ALLOCATE_ARRAY_METHOD.invoke(UNSAFE, byte[].class, size);
+        } catch (IllegalAccessException e) {
+            throw new Error(e);
+        } catch (InvocationTargetException e) {
+            throw new Error(e);
+        }
     }
 
     static ByteBuffer newDirectBuffer(long address, int capacity) {
