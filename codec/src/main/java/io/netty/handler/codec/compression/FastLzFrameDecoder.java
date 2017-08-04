@@ -71,7 +71,7 @@ public class FastLzFrameDecoder extends ByteToMessageDecoder {
     private boolean hasChecksum;
 
     /**
-     * Chechsum value of current received chunk of data which has checksum.
+     * Checksum value of current received chunk of data which has checksum.
      */
     private int currentChecksum;
 
@@ -204,7 +204,7 @@ public class FastLzFrameDecoder extends ByteToMessageDecoder {
                     currentState = State.INIT_BLOCK;
                     success = true;
                 } finally {
-                    if (!success) {
+                    if (!success && uncompressed != null) {
                         uncompressed.release();
                     }
                 }

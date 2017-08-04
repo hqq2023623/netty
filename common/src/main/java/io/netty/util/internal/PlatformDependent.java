@@ -19,9 +19,11 @@ import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.jctools.queues.MpscArrayQueue;
 import org.jctools.queues.MpscChunkedArrayQueue;
+import org.jctools.queues.MpscUnboundedArrayQueue;
 import org.jctools.queues.SpscLinkedQueue;
 import org.jctools.queues.atomic.MpscAtomicArrayQueue;
-import org.jctools.queues.atomic.MpscLinkedAtomicQueue;
+import org.jctools.queues.atomic.MpscGrowableAtomicArrayQueue;
+import org.jctools.queues.atomic.MpscUnboundedAtomicArrayQueue;
 import org.jctools.queues.atomic.SpscLinkedAtomicQueue;
 import org.jctools.util.Pow2;
 import org.jctools.util.UnsafeAccess;
@@ -51,6 +53,8 @@ import static io.netty.util.internal.PlatformDependent0.HASH_CODE_C1;
 import static io.netty.util.internal.PlatformDependent0.HASH_CODE_C2;
 import static io.netty.util.internal.PlatformDependent0.hashCodeAsciiSanitize;
 import static io.netty.util.internal.PlatformDependent0.unalignedAccess;
+import static java.lang.Math.max;
+import static java.lang.Math.min;
 
 /**
  * Utility that detects various properties specific to the current runtime
@@ -67,14 +71,8 @@ public final class PlatformDependent {
     private static final Pattern MAX_DIRECT_MEMORY_SIZE_ARG_PATTERN = Pattern.compile(
             "\\s*-XX:MaxDirectMemorySize\\s*=\\s*([0-9]+)\\s*([kKmMgG]?)\\s*$");
 
-    // this must be initialized before any code below triggers initialization of PlatformDependent0
-    private static final boolean IS_EXPLICIT_NO_UNSAFE = explicitNoUnsafe0();
-
-    private static final boolean IS_ANDROID = isAndroid0();
     private static final boolean IS_WINDOWS = isWindows0();
     private static final boolean MAYBE_SUPER_USER;
-
-    private static final int JAVA_VERSION = javaVersion0();
 
     private static final boolean CAN_ENABLE_TCP_NODELAY_BY_DEFAULT = !isAndroid();
 
@@ -85,7 +83,6 @@ public final class PlatformDependent {
 
     private static final int MPSC_CHUNK_SIZE =  1024;
     private static final int MIN_MAX_MPSC_CAPACITY =  MPSC_CHUNK_SIZE * 2;
-    private static final int DEFAULT_MAX_MPSC_CAPACITY =  MPSC_CHUNK_SIZE * MPSC_CHUNK_SIZE;
     private static final int MAX_ALLOWED_MPSC_CAPACITY = Pow2.MAX_POW2;
 
     private static final long BYTE_ARRAY_BASE_OFFSET = byteArrayBaseOffset0();
@@ -99,8 +96,17 @@ public final class PlatformDependent {
     private static final AtomicLong DIRECT_MEMORY_COUNTER;
     private static final long DIRECT_MEMORY_LIMIT;
     private static final ThreadLocalRandomProvider RANDOM_PROVIDER;
+    private static final Cleaner CLEANER;
+    private static final int UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD;
 
     public static final boolean BIG_ENDIAN_NATIVE_ORDER = ByteOrder.nativeOrder() == ByteOrder.BIG_ENDIAN;
+
+    private static final Cleaner NOOP = new Cleaner() {
+        @Override
+        public void freeDirectBuffer(ByteBuffer buffer) {
+            // NOOP
+        }
+    };
 
     static {
         if (javaVersion() >= 7) {
@@ -122,11 +128,15 @@ public final class PlatformDependent {
             logger.debug("-Dio.netty.noPreferDirect: {}", !DIRECT_BUFFER_PREFERRED);
         }
 
-        if (!hasUnsafe() && !isAndroid() && !IS_EXPLICIT_NO_UNSAFE) {
+        /*
+         * We do not want to log this message if unsafe is explicitly disabled. Do not remove the explicit no unsafe
+         * guard.
+         */
+        if (!hasUnsafe() && !isAndroid() && !PlatformDependent0.isExplicitNoUnsafe()) {
             logger.info(
                     "Your platform does not provide complete low-level API for accessing direct buffers reliably. " +
                     "Unless explicitly requested, heap buffer will always be preferred to avoid potential system " +
-                    "unstability.");
+                    "instability.");
         }
 
         // Here is how the system property is used:
@@ -155,16 +165,39 @@ public final class PlatformDependent {
             }
         }
         DIRECT_MEMORY_LIMIT = maxDirectMemory;
-        logger.debug("io.netty.maxDirectMemory: {} bytes", maxDirectMemory);
+        logger.debug("-Dio.netty.maxDirectMemory: {} bytes", maxDirectMemory);
+
+        int tryAllocateUninitializedArray =
+                SystemPropertyUtil.getInt("io.netty.uninitializedArrayAllocationThreshold", 1024);
+        UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD = javaVersion() >= 9 && PlatformDependent0.hasAllocateArrayMethod() ?
+                tryAllocateUninitializedArray : -1;
+        logger.debug("-Dio.netty.uninitializedArrayAllocationThreshold: {}", UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD);
 
         MAYBE_SUPER_USER = maybeSuperUser0();
+
+        if (!isAndroid() && hasUnsafe()) {
+            // only direct to method if we are not running on android.
+            // See https://github.com/netty/netty/issues/2604
+            if (javaVersion() >= 9) {
+                CLEANER = CleanerJava9.isSupported() ? new CleanerJava9() : NOOP;
+            } else {
+                CLEANER = CleanerJava6.isSupported() ? new CleanerJava6() : NOOP;
+            }
+        } else {
+            CLEANER = NOOP;
+        }
+    }
+
+    public static byte[] allocateUninitializedArray(int size) {
+        return UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD < 0 || UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD > size ?
+                new byte[size] : PlatformDependent0.allocateUninitializedArray(size);
     }
 
     /**
      * Returns {@code true} if and only if the current platform is Android
      */
     public static boolean isAndroid() {
-        return IS_ANDROID;
+        return PlatformDependent0.isAndroid();
     }
 
     /**
@@ -186,7 +219,7 @@ public final class PlatformDependent {
      * Return the version of Java under which this library is used.
      */
     public static int javaVersion() {
-        return JAVA_VERSION;
+        return PlatformDependent0.javaVersion();
     }
 
     /**
@@ -197,7 +230,7 @@ public final class PlatformDependent {
     }
 
     /**
-     * Return {@code true} if {@code sun.misc.Unsafe} was found on the classpath and can be used for acclerated
+     * Return {@code true} if {@code sun.misc.Unsafe} was found on the classpath and can be used for accelerated
      * direct memory access.
      */
     public static boolean hasUnsafe() {
@@ -258,6 +291,10 @@ public final class PlatformDependent {
         PlatformDependent0.freeMemory(address);
     }
 
+    public static long reallocateMemory(long address, long newSize) {
+        return PlatformDependent0.reallocateMemory(address, newSize);
+    }
+
     /**
      * Raises an exception bypassing compiler checks for checked exceptions.
      */
@@ -275,14 +312,14 @@ public final class PlatformDependent {
     }
 
     /**
-     * Creates a new fastest {@link ConcurrentMap} implementaion for the current platform.
+     * Creates a new fastest {@link ConcurrentMap} implementation for the current platform.
      */
     public static <K, V> ConcurrentMap<K, V> newConcurrentHashMap() {
         return new ConcurrentHashMap<K, V>();
     }
 
     /**
-     * Creates a new fastest {@link LongCounter} implementaion for the current platform.
+     * Creates a new fastest {@link LongCounter} implementation for the current platform.
      */
     public static LongCounter newLongCounter() {
         if (javaVersion() >= 8) {
@@ -293,21 +330,21 @@ public final class PlatformDependent {
     }
 
     /**
-     * Creates a new fastest {@link ConcurrentMap} implementaion for the current platform.
+     * Creates a new fastest {@link ConcurrentMap} implementation for the current platform.
      */
     public static <K, V> ConcurrentMap<K, V> newConcurrentHashMap(int initialCapacity) {
         return new ConcurrentHashMap<K, V>(initialCapacity);
     }
 
     /**
-     * Creates a new fastest {@link ConcurrentMap} implementaion for the current platform.
+     * Creates a new fastest {@link ConcurrentMap} implementation for the current platform.
      */
     public static <K, V> ConcurrentMap<K, V> newConcurrentHashMap(int initialCapacity, float loadFactor) {
         return new ConcurrentHashMap<K, V>(initialCapacity, loadFactor);
     }
 
     /**
-     * Creates a new fastest {@link ConcurrentMap} implementaion for the current platform.
+     * Creates a new fastest {@link ConcurrentMap} implementation for the current platform.
      */
     public static <K, V> ConcurrentMap<K, V> newConcurrentHashMap(
             int initialCapacity, float loadFactor, int concurrencyLevel) {
@@ -315,22 +352,18 @@ public final class PlatformDependent {
     }
 
     /**
-     * Creates a new fastest {@link ConcurrentMap} implementaion for the current platform.
+     * Creates a new fastest {@link ConcurrentMap} implementation for the current platform.
      */
     public static <K, V> ConcurrentMap<K, V> newConcurrentHashMap(Map<? extends K, ? extends V> map) {
         return new ConcurrentHashMap<K, V>(map);
     }
 
     /**
-     * Try to deallocate the specified direct {@link ByteBuffer}.  Please note this method does nothing if
+     * Try to deallocate the specified direct {@link ByteBuffer}. Please note this method does nothing if
      * the current platform does not support this operation or the specified buffer is not a direct buffer.
      */
     public static void freeDirectBuffer(ByteBuffer buffer) {
-        if (hasUnsafe() && !isAndroid()) {
-            // only direct to method if we are not running on android.
-            // See https://github.com/netty/netty/issues/2604
-            PlatformDependent0.freeDirectBuffer(buffer);
-        }
+        CLEANER.freeDirectBuffer(buffer);
     }
 
     public static long directBufferAddress(ByteBuffer buffer) {
@@ -473,7 +506,7 @@ public final class PlatformDependent {
     /**
      * Identical to {@link PlatformDependent0#hashCodeAsciiSanitize(byte)} but for {@link CharSequence}.
      */
-    private static int hashCodeAsciiSanitizsByte(char value) {
+    private static int hashCodeAsciiSanitizeByte(char value) {
         return value & 0x1f;
     }
 
@@ -621,6 +654,19 @@ public final class PlatformDependent {
     }
 
     /**
+     * Determine if a subsection of an array is zero.
+     * @param bytes The byte array.
+     * @param startPos The starting index (inclusive) in {@code bytes}.
+     * @param length The amount of bytes to check for zero.
+     * @return {@code false} if {@code bytes[startPos:startsPos+length)} contains a value other than zero.
+     */
+    public static boolean isZero(byte[] bytes, int startPos, int length) {
+        return !hasUnsafe() || !unalignedAccess() ?
+                isZeroSafe(bytes, startPos, length) :
+                PlatformDependent0.isZero(bytes, startPos, length);
+    }
+
+    /**
      * Compare two {@code byte} arrays for equality without leaking timing information.
      * For performance reasons no bounds checking on the parameters is performed.
      * <p>
@@ -729,24 +775,24 @@ public final class PlatformDependent {
         }
         switch(remainingBytes) {
             case 7:
-                return ((hash * HASH_CODE_C1 + hashCodeAsciiSanitizsByte(bytes.charAt(0)))
+                return ((hash * HASH_CODE_C1 + hashCodeAsciiSanitizeByte(bytes.charAt(0)))
                               * HASH_CODE_C2 + hashCodeAsciiSanitizeShort(bytes, 1))
                               * HASH_CODE_C1 + hashCodeAsciiSanitizeInt(bytes, 3);
             case 6:
                 return (hash * HASH_CODE_C1 + hashCodeAsciiSanitizeShort(bytes, 0))
                              * HASH_CODE_C2 + hashCodeAsciiSanitizeInt(bytes, 2);
             case 5:
-                return (hash * HASH_CODE_C1 + hashCodeAsciiSanitizsByte(bytes.charAt(0)))
+                return (hash * HASH_CODE_C1 + hashCodeAsciiSanitizeByte(bytes.charAt(0)))
                              * HASH_CODE_C2 + hashCodeAsciiSanitizeInt(bytes, 1);
             case 4:
                 return hash * HASH_CODE_C1 + hashCodeAsciiSanitizeInt(bytes, 0);
             case 3:
-                return (hash * HASH_CODE_C1 + hashCodeAsciiSanitizsByte(bytes.charAt(0)))
+                return (hash * HASH_CODE_C1 + hashCodeAsciiSanitizeByte(bytes.charAt(0)))
                              * HASH_CODE_C2 + hashCodeAsciiSanitizeShort(bytes, 1);
             case 2:
                 return hash * HASH_CODE_C1 + hashCodeAsciiSanitizeShort(bytes, 0);
             case 1:
-                return hash * HASH_CODE_C1 + hashCodeAsciiSanitizsByte(bytes.charAt(0));
+                return hash * HASH_CODE_C1 + hashCodeAsciiSanitizeByte(bytes.charAt(0));
             default:
                 return hash;
         }
@@ -783,25 +829,27 @@ public final class PlatformDependent {
         }
 
         static <T> Queue<T> newMpscQueue(final int maxCapacity) {
-            if (USE_MPSC_CHUNKED_ARRAY_QUEUE) {
-                // Calculate the max capacity which can not be bigger then MAX_ALLOWED_MPSC_CAPACITY.
-                // This is forced by the MpscChunkedArrayQueue implementation as will try to round it
-                // up to the next power of two and so will overflow otherwise.
-                final int capacity =
-                        Math.max(Math.min(maxCapacity, MAX_ALLOWED_MPSC_CAPACITY), MIN_MAX_MPSC_CAPACITY);
-                return new MpscChunkedArrayQueue<T>(MPSC_CHUNK_SIZE, capacity);
-            } else {
-                return new MpscLinkedAtomicQueue<T>();
-            }
+            // Calculate the max capacity which can not be bigger then MAX_ALLOWED_MPSC_CAPACITY.
+            // This is forced by the MpscChunkedArrayQueue implementation as will try to round it
+            // up to the next power of two and so will overflow otherwise.
+            final int capacity = max(min(maxCapacity, MAX_ALLOWED_MPSC_CAPACITY), MIN_MAX_MPSC_CAPACITY);
+            return USE_MPSC_CHUNKED_ARRAY_QUEUE ? new MpscChunkedArrayQueue<T>(MPSC_CHUNK_SIZE, capacity)
+                                                : new MpscGrowableAtomicArrayQueue<T>(MPSC_CHUNK_SIZE, capacity);
+        }
+
+        static <T> Queue<T> newMpscQueue() {
+            return USE_MPSC_CHUNKED_ARRAY_QUEUE ? new MpscUnboundedArrayQueue<T>(MPSC_CHUNK_SIZE)
+                                                : new MpscUnboundedAtomicArrayQueue<T>(MPSC_CHUNK_SIZE);
         }
     }
 
     /**
      * Create a new {@link Queue} which is safe to use for multiple producers (different threads) and a single
      * consumer (one thread!).
+     * @return A MPSC queue which may be unbounded.
      */
     public static <T> Queue<T> newMpscQueue() {
-        return newMpscQueue(DEFAULT_MAX_MPSC_CAPACITY);
+        return Mpsc.newMpscQueue();
     }
 
     /**
@@ -867,22 +915,6 @@ public final class PlatformDependent {
         return RANDOM_PROVIDER.current();
     }
 
-    private static boolean isAndroid0() {
-        boolean android;
-        try {
-            Class.forName("android.app.Application", false, getSystemClassLoader());
-            android = true;
-        } catch (Throwable ignored) {
-            // Failed to load the class uniquely available in Android.
-            android = false;
-        }
-
-        if (android) {
-            logger.debug("Platform: Android");
-        }
-        return android;
-    }
-
     private static boolean isWindows0() {
         boolean windows = SystemPropertyUtil.get("os.name", "").toLowerCase(Locale.US).contains("win");
         if (windows) {
@@ -900,75 +932,13 @@ public final class PlatformDependent {
         return "root".equals(username) || "toor".equals(username);
     }
 
-    private static int javaVersion0() {
-        final int majorVersion;
-
-        if (isAndroid()) {
-            majorVersion = 6;
-        } else {
-            majorVersion = majorVersionFromJavaSpecificationVersion();
-        }
-
-        logger.debug("Java version: {}", majorVersion);
-
-        return majorVersion;
-    }
-
-    static int majorVersionFromJavaSpecificationVersion() {
-        return majorVersion(SystemPropertyUtil.get("java.specification.version", "1.6"));
-    }
-
-    static int majorVersion(final String javaSpecVersion) {
-        final String[] components = javaSpecVersion.split("\\.");
-        final int[] version = new int[components.length];
-        for (int i = 0; i < components.length; i++) {
-            version[i] = Integer.parseInt(components[i]);
-        }
-
-        if (version[0] == 1) {
-            assert version[1] >= 6;
-            return version[1];
-        } else {
-            return version[0];
-        }
-    }
-
-    static boolean isExplicitNoUnsafe() {
-        return IS_EXPLICIT_NO_UNSAFE;
-    }
-
-    private static boolean explicitNoUnsafe0() {
-        final boolean noUnsafe = SystemPropertyUtil.getBoolean("io.netty.noUnsafe", false);
-        logger.debug("-Dio.netty.noUnsafe: {}", noUnsafe);
-
-        if (noUnsafe) {
-            logger.debug("sun.misc.Unsafe: unavailable (io.netty.noUnsafe)");
-            return true;
-        }
-
-        // Legacy properties
-        boolean tryUnsafe;
-        if (SystemPropertyUtil.contains("io.netty.tryUnsafe")) {
-            tryUnsafe = SystemPropertyUtil.getBoolean("io.netty.tryUnsafe", true);
-        } else {
-            tryUnsafe = SystemPropertyUtil.getBoolean("org.jboss.netty.tryUnsafe", true);
-        }
-
-        if (!tryUnsafe) {
-            logger.debug("sun.misc.Unsafe: unavailable (io.netty.tryUnsafe/org.jboss.netty.tryUnsafe)");
-            return true;
-        }
-
-        return false;
-    }
-
     private static boolean hasUnsafe0() {
         if (isAndroid()) {
             logger.debug("sun.misc.Unsafe: unavailable (Android)");
             return false;
         }
 
-        if (IS_EXPLICIT_NO_UNSAFE) {
+        if (PlatformDependent0.isExplicitNoUnsafe()) {
             return false;
         }
 
@@ -1183,8 +1153,18 @@ public final class PlatformDependent {
 
     private static boolean equalsSafe(byte[] bytes1, int startPos1, byte[] bytes2, int startPos2, int length) {
         final int end = startPos1 + length;
-        for (int i = startPos1, j = startPos2; i < end; ++i, ++j) {
-            if (bytes1[i] != bytes2[j]) {
+        for (; startPos1 < end; ++startPos1, ++startPos2) {
+            if (bytes1[startPos1] != bytes2[startPos2]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isZeroSafe(byte[] bytes, int startPos, int length) {
+        final int end = startPos + length;
+        for (; startPos < end; ++startPos) {
+            if (bytes[startPos] != 0) {
                 return false;
             }
         }

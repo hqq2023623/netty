@@ -15,6 +15,7 @@
  */
 package io.netty.handler.ssl;
 
+import io.netty.buffer.ByteBufAllocator;
 import javax.net.ssl.SSLEngine;
 
 /**
@@ -23,16 +24,16 @@ import javax.net.ssl.SSLEngine;
 public final class JdkNpnApplicationProtocolNegotiator extends JdkBaseApplicationProtocolNegotiator {
     private static final SslEngineWrapperFactory NPN_WRAPPER = new SslEngineWrapperFactory() {
         {
-            if (!JdkNpnSslEngine.isAvailable()) {
-                throw new RuntimeException("NPN unsupported. Is your classpatch configured correctly?"
+            if (!JettyNpnSslEngine.isAvailable()) {
+                throw new RuntimeException("NPN unsupported. Is your classpath configured correctly?"
                         + " See https://wiki.eclipse.org/Jetty/Feature/NPN");
             }
         }
 
         @Override
-        public SSLEngine wrapSslEngine(SSLEngine engine, JdkApplicationProtocolNegotiator applicationNegotiator,
-                boolean isServer) {
-            return new JdkNpnSslEngine(engine, applicationNegotiator, isServer);
+        public SSLEngine wrapSslEngine(SSLEngine engine, ByteBufAllocator alloc,
+                                       JdkApplicationProtocolNegotiator applicationNegotiator, boolean isServer) {
+            return new JettyNpnSslEngine(engine, applicationNegotiator, isServer);
         }
     };
 
