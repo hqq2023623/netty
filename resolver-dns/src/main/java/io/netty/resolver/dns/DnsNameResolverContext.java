@@ -153,6 +153,8 @@ abstract class DnsNameResolverContext<T> {
     }
 
     private static final class SearchDomainUnknownHostException extends UnknownHostException {
+        private static final long serialVersionUID = -8573510133644997085L;
+
         SearchDomainUnknownHostException(Throwable cause, String originalHostname) {
             super("Search domain query failed. Original hostname: '" + originalHostname + "' " + cause.getMessage());
             setStackTrace(cause.getStackTrace());
@@ -236,7 +238,7 @@ abstract class DnsNameResolverContext<T> {
             }
             idx = idx2;
 
-            List<DnsCacheEntry> entries = parent.authoritativeDnsServerCache().get(hostname, additionals);
+            List<? extends DnsCacheEntry> entries = parent.authoritativeDnsServerCache().get(hostname, additionals);
             if (entries != null && !entries.isEmpty()) {
                 return DnsServerAddresses.sequential(new DnsCacheIterable(entries)).stream();
             }
@@ -244,16 +246,16 @@ abstract class DnsNameResolverContext<T> {
     }
 
     private final class DnsCacheIterable implements Iterable<InetSocketAddress> {
-        private final List<DnsCacheEntry> entries;
+        private final List<? extends DnsCacheEntry> entries;
 
-        DnsCacheIterable(List<DnsCacheEntry> entries) {
+        DnsCacheIterable(List<? extends DnsCacheEntry> entries) {
             this.entries = entries;
         }
 
         @Override
         public Iterator<InetSocketAddress> iterator() {
             return new Iterator<InetSocketAddress>() {
-                Iterator<DnsCacheEntry> entryIterator = entries.iterator();
+                Iterator<? extends DnsCacheEntry> entryIterator = entries.iterator();
 
                 @Override
                 public boolean hasNext() {
@@ -484,9 +486,8 @@ abstract class DnsNameResolverContext<T> {
                 resolvedEntries = new ArrayList<DnsCacheEntry>(8);
             }
 
-            final DnsCacheEntry e = new DnsCacheEntry(hostname, resolved);
-            resolveCache.cache(hostname, additionals, resolved, r.timeToLive(), parent.ch.eventLoop());
-            resolvedEntries.add(e);
+            resolvedEntries.add(
+                    resolveCache.cache(hostname, additionals, resolved, r.timeToLive(), parent.ch.eventLoop()));
             found = true;
 
             // Note that we do not break from the loop here, so we decode/cache all A/AAAA records.
@@ -734,7 +735,7 @@ abstract class DnsNameResolverContext<T> {
         DnsQuestion cnameQuestion = null;
         if (parent.supportsARecords()) {
             try {
-                if ((cnameQuestion = newQuestion(hostname, DnsRecordType.A)) == null) {
+                if ((cnameQuestion = newQuestion(cname, DnsRecordType.A)) == null) {
                     return;
                 }
             } catch (Throwable cause) {
@@ -745,7 +746,7 @@ abstract class DnsNameResolverContext<T> {
         }
         if (parent.supportsAAAARecords()) {
             try {
-                if ((cnameQuestion = newQuestion(hostname, DnsRecordType.AAAA)) == null) {
+                if ((cnameQuestion = newQuestion(cname, DnsRecordType.AAAA)) == null) {
                     return;
                 }
             } catch (Throwable cause) {
@@ -766,7 +767,7 @@ abstract class DnsNameResolverContext<T> {
         return true;
     }
 
-    private DnsQuestion newQuestion(String hostname, DnsRecordType type) {
+    private static DnsQuestion newQuestion(String hostname, DnsRecordType type) {
         try {
             return new DefaultDnsQuestion(hostname, type);
         } catch (IllegalArgumentException e) {

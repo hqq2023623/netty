@@ -40,7 +40,6 @@ import java.security.cert.CertificateExpiredException;
 import java.security.cert.CertificateNotYetValidException;
 import java.security.cert.CertificateRevokedException;
 import java.security.cert.X509Certificate;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -153,6 +152,7 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
     private volatile boolean rejectRemoteInitiatedRenegotiation;
     private volatile int bioNonApplicationBufferSize = DEFAULT_BIO_NON_APPLICATION_BUFFER_SIZE;
 
+    @SuppressWarnings("deprecation")
     static final OpenSslApplicationProtocolNegotiator NONE_PROTOCOL_NEGOTIATOR =
             new OpenSslApplicationProtocolNegotiator() {
                 @Override
@@ -379,13 +379,13 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
     }
 
     @Override
-    final SslHandler newHandler(ByteBufAllocator alloc, boolean startTls) {
-        return new SslHandler(newEngine0(alloc, null, -1, false), startTls, false);
+    protected final SslHandler newHandler(ByteBufAllocator alloc, boolean startTls) {
+        return new SslHandler(newEngine0(alloc, null, -1, false), startTls);
     }
 
     @Override
-    final SslHandler newHandler(ByteBufAllocator alloc, String peerHost, int peerPort, boolean startTls) {
-        return new SslHandler(newEngine0(alloc, peerHost, peerPort, false), startTls, false);
+    protected final SslHandler newHandler(ByteBufAllocator alloc, String peerHost, int peerPort, boolean startTls) {
+        return new SslHandler(newEngine0(alloc, peerHost, peerPort, false), startTls);
     }
 
     SSLEngine newEngine0(ByteBufAllocator alloc, String peerHost, int peerPort, boolean jdkCompatibilityMode) {
@@ -545,6 +545,7 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
      * @param config The configuration which defines the translation
      * @return The results of the translation
      */
+    @SuppressWarnings("deprecation")
     static OpenSslApplicationProtocolNegotiator toNegotiator(ApplicationProtocolConfig config) {
         if (config == null) {
             return NONE_PROTOCOL_NEGOTIATOR;

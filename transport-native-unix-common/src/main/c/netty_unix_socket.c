@@ -183,8 +183,16 @@ static int socket_type(JNIEnv* env) {
         }
         return AF_INET6;
     } else {
+        // Explicitly try to bind to ::1 to ensure IPV6 can really be used.
+        // See https://github.com/netty/netty/issues/7021.
+        struct sockaddr_in6 addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin6_family = AF_INET6;
+        addr.sin6_addr.s6_addr[15] = 1; /* [::1]:0 */
+        int res = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
+
         close(fd);
-        return AF_INET6;
+        return res == 0 ? AF_INET6 : AF_INET;
     }
 }
 
@@ -747,18 +755,26 @@ static void netty_unix_socket_setSoLinger(JNIEnv* env, jclass clazz, jint fd, ji
 }
 
 static void netty_unix_socket_setTrafficClass(JNIEnv* env, jclass clazz, jint fd, jint optval) {
-    /* Try to set the ipv6 equivalent, but don't throw if this is an ipv4 only socket. */
-    int rc = netty_unix_socket_setOption0(fd, IPPROTO_IPV6, IPV6_TCLASS, &optval, sizeof(optval));
-    if (rc < 0 && errno != ENOPROTOOPT) {
-        netty_unix_socket_setOptionHandleError(env, errno);
-    }
+    if (socketType == AF_INET6) {
+        // This call will put an exception on the stack to be processed once the JNI calls completes if
+        // setsockopt failed and return a negative value.
+        int rc = netty_unix_socket_setOption(env, fd, IPPROTO_IPV6, IPV6_TCLASS, &optval, sizeof(optval));
 
-    /* Linux allows both ipv4 and ipv6 families to be set */
+        if (rc >= 0) {
+/* Linux allows both ipv4 and ipv6 families to be set */
 #ifdef __linux__
-      else {
+            // Previous call successful now try to set also for ipv4
+            if (netty_unix_socket_setOption0(fd, IPPROTO_IP, IP_TOS, &optval, sizeof(optval)) == -1) {
+                if (errno != ENOPROTOOPT) {
+                    // throw exception
+                    netty_unix_socket_setOptionHandleError(env, errno);
+                }
+            }
+#endif
+        }
+    } else {
         netty_unix_socket_setOption(env, fd, IPPROTO_IP, IP_TOS, &optval, sizeof(optval));
     }
-#endif
 }
 
 static jint netty_unix_socket_isKeepAlive(JNIEnv* env, jclass clazz, jint fd) {
@@ -806,15 +822,23 @@ static jint netty_unix_socket_getSoLinger(JNIEnv* env, jclass clazz, jint fd) {
 }
 
 static jint netty_unix_socket_getTrafficClass(JNIEnv* env, jclass clazz, jint fd) {
-    /* macOS may throw an error if IPv6 is supported and it is not consulted first */
     int optval;
-    if (netty_unix_socket_getOption0(fd, IPPROTO_IPV6, IPV6_TCLASS, &optval, sizeof(optval)) == -1) {
-        if (errno != ENOPROTOOPT || netty_unix_socket_getOption0(fd, IPPROTO_IP, IP_TOS, &optval, sizeof(optval)) == -1) {
-            netty_unix_socket_getOptionHandleError(env, errno);
-            return -1;
+    if (socketType == AF_INET6) {
+        if (netty_unix_socket_getOption0(fd, IPPROTO_IPV6, IPV6_TCLASS, &optval, sizeof(optval)) == -1) {
+            if (errno == ENOPROTOOPT) {
+                if (netty_unix_socket_getOption(env, fd, IPPROTO_IP, IP_TOS, &optval, sizeof(optval)) == -1) {
+                    return -1;
+                }
+            } else {
+                netty_unix_socket_getOptionHandleError(env, errno);
+                return -1;
+            }
         }
+    } else {
+         if (netty_unix_socket_getOption(env, fd, IPPROTO_IP, IP_TOS, &optval, sizeof(optval)) == -1) {
+            return -1;
+         }
     }
-
     return optval;
 }
 

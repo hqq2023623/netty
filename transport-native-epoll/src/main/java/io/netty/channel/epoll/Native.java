@@ -23,6 +23,8 @@ import io.netty.util.internal.SystemPropertyUtil;
 import io.netty.channel.unix.FileDescriptor;
 import io.netty.channel.unix.NativeInetAddress;
 import io.netty.util.internal.ThrowableUtil;
+import io.netty.util.internal.logging.InternalLogger;
+import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import java.io.IOException;
 import java.net.InetAddress;
@@ -51,6 +53,8 @@ import static io.netty.channel.unix.Errors.newIOException;
  * <p>Static members which call JNI methods must be defined in {@link NativeStaticallyReferencedJniMethods}.
  */
 public final class Native {
+    private static final InternalLogger logger = InternalLoggerFactory.getInstance(Native.class);
+
     static {
         try {
             // First, try calling a side-effect free JNI method to see if the library was already
@@ -97,9 +101,15 @@ public final class Native {
         return new FileDescriptor(eventFd());
     }
 
+    public static FileDescriptor newTimerFd() {
+        return new FileDescriptor(timerFd());
+    }
+
     private static native int eventFd();
+    private static native int timerFd();
     public static native void eventFdWrite(int fd, long value);
     public static native void eventFdRead(int fd);
+    static native void timerFdRead(int fd);
 
     public static FileDescriptor newEpollCreate() {
         return new FileDescriptor(epollCreate());
@@ -107,14 +117,16 @@ public final class Native {
 
     private static native int epollCreate();
 
-    public static int epollWait(int efd, EpollEventArray events, int timeout) throws IOException {
-        int ready = epollWait0(efd, events.memoryAddress(), events.length(), timeout);
+    public static int epollWait(FileDescriptor epollFd, EpollEventArray events, FileDescriptor timerFd,
+                                int timeoutSec, int timeoutNs) throws IOException {
+        int ready = epollWait0(epollFd.intValue(), events.memoryAddress(), events.length(), timerFd.intValue(),
+                               timeoutSec, timeoutNs);
         if (ready < 0) {
             throw newIOException("epoll_wait", ready);
         }
         return ready;
     }
-    private static native int epollWait0(int efd, long address, int len, int timeout);
+    private static native int epollWait0(int efd, long address, int len, int timerFd, int timeoutSec, int timeoutNs);
 
     public static void epollCtlAdd(int efd, final int fd, final int flags) throws IOException {
         int res = epollCtlAdd0(efd, fd, flags);
@@ -188,11 +200,20 @@ public final class Native {
         if (!name.startsWith("linux")) {
             throw new IllegalStateException("Only supported on Linux");
         }
-        String []libraryNames = new String[] {
-          "netty-transport-native-epoll",
-          "netty_transport_native_epoll"
-        };
-        NativeLibraryLoader.loadFirstAvailable(PlatformDependent.getClassLoader(Native.class), libraryNames);
+        String staticLibName = "netty_transport_native_epoll";
+        String sharedLibName = staticLibName + '_' + PlatformDependent.normalizedArch();
+        ClassLoader cl = PlatformDependent.getClassLoader(Native.class);
+        try {
+            NativeLibraryLoader.load(sharedLibName, cl);
+        } catch (UnsatisfiedLinkError e1) {
+            try {
+                NativeLibraryLoader.load(staticLibName, cl);
+                logger.debug("Failed to load {}", sharedLibName, e1);
+            } catch (UnsatisfiedLinkError e2) {
+                ThrowableUtil.addSuppressed(e1, e2);
+                throw e1;
+            }
+        }
     }
 
     private Native() {

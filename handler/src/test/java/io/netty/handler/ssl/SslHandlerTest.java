@@ -23,11 +23,14 @@ import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.embedded.EmbeddedChannel;
@@ -40,6 +43,7 @@ import io.netty.handler.codec.UnsupportedMessageTypeException;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
 import io.netty.handler.ssl.util.SimpleTrustManagerFactory;
+import io.netty.util.AbstractReferenceCounted;
 import io.netty.util.IllegalReferenceCountException;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.ReferenceCounted;
@@ -54,6 +58,7 @@ import java.io.File;
 import java.net.InetSocketAddress;
 import java.nio.channels.ClosedChannelException;
 import java.security.KeyStore;
+import java.security.NoSuchAlgorithmException;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.concurrent.BlockingQueue;
@@ -83,6 +88,36 @@ import static org.junit.Assume.assumeTrue;
 
 public class SslHandlerTest {
 
+    @Test(expected = SSLException.class, timeout = 3000)
+    public void testClientHandshakeTimeout() throws Exception {
+        testHandshakeTimeout(true);
+    }
+
+    @Test(expected = SSLException.class, timeout = 3000)
+    public void testServerHandshakeTimeout() throws Exception {
+        testHandshakeTimeout(false);
+    }
+
+    private static void testHandshakeTimeout(boolean client) throws Exception {
+        SSLEngine engine = SSLContext.getDefault().createSSLEngine();
+        engine.setUseClientMode(client);
+        SslHandler handler = new SslHandler(engine);
+        handler.setHandshakeTimeoutMillis(1);
+
+        EmbeddedChannel ch = new EmbeddedChannel(handler);
+        try {
+            while (!handler.handshakeFuture().isDone()) {
+                Thread.sleep(10);
+                // We need to run all pending tasks as the handshake timeout is scheduled on the EventLoop.
+                ch.runPendingTasks();
+            }
+
+            handler.handshakeFuture().syncUninterruptibly();
+        } finally {
+            ch.finishAndReleaseAll();
+        }
+    }
+
     @Test
     public void testTruncatedPacket() throws Exception {
         SSLEngine engine = SSLContext.getDefault().createSSLEngine();
@@ -111,6 +146,33 @@ public class SslHandlerTest {
         }
     }
 
+    @Test
+    public void testNonByteBufWriteIsReleased() throws Exception {
+        SSLEngine engine = SSLContext.getDefault().createSSLEngine();
+        engine.setUseClientMode(false);
+
+        EmbeddedChannel ch = new EmbeddedChannel(new SslHandler(engine));
+
+        AbstractReferenceCounted referenceCounted = new AbstractReferenceCounted() {
+            @Override
+            public ReferenceCounted touch(Object hint) {
+                return this;
+            }
+
+            @Override
+            protected void deallocate() {
+            }
+        };
+        try {
+            ch.write(referenceCounted).get();
+            fail();
+        } catch (ExecutionException e) {
+            assertThat(e.getCause(), is(instanceOf(UnsupportedMessageTypeException.class)));
+        }
+        assertEquals(0, referenceCounted.refCnt());
+        assertTrue(ch.finishAndReleaseAll());
+    }
+
     @Test(expected = UnsupportedMessageTypeException.class)
     public void testNonByteBufNotPassThrough() throws Exception {
         SSLEngine engine = SSLContext.getDefault().createSSLEngine();
@@ -123,6 +185,22 @@ public class SslHandlerTest {
         } finally {
             ch.finishAndReleaseAll();
         }
+    }
+
+    @Test
+    public void testIncompleteWriteDoesNotCompletePromisePrematurely() throws NoSuchAlgorithmException {
+        SSLEngine engine = SSLContext.getDefault().createSSLEngine();
+        engine.setUseClientMode(false);
+
+        EmbeddedChannel ch = new EmbeddedChannel(new SslHandler(engine));
+
+        ChannelPromise promise = ch.newPromise();
+        ByteBuf buf = Unpooled.buffer(10).writeZero(10);
+        ch.writeAndFlush(buf, promise);
+        assertFalse(promise.isDone());
+        assertTrue(ch.finishAndReleaseAll());
+        assertTrue(promise.isDone());
+        assertThat(promise.cause(), is(instanceOf(SSLException.class)));
     }
 
     @Test
@@ -651,7 +729,7 @@ public class SslHandlerTest {
         }
     }
 
-    @Test(timeout = 300000)
+    @Test(timeout = 480000)
     public void testCompositeBufSizeEstimationGuaranteesSynchronousWrite()
             throws CertificateException, SSLException, ExecutionException, InterruptedException {
         SslProvider[] providers = SslProvider.values();
@@ -661,22 +739,27 @@ public class SslHandlerTest {
                 for (int j = 0; j < providers.length; ++j) {
                     SslProvider clientProvider = providers[j];
                     if (isSupported(clientProvider)) {
-                        compositeBufSizeEstimationGuaranteesSynchronousWrite(serverProvider, clientProvider,
-                                true, true, true);
-                        compositeBufSizeEstimationGuaranteesSynchronousWrite(serverProvider, clientProvider,
-                                true, true, false);
-                        compositeBufSizeEstimationGuaranteesSynchronousWrite(serverProvider, clientProvider,
-                                true, false, true);
-                        compositeBufSizeEstimationGuaranteesSynchronousWrite(serverProvider, clientProvider,
-                                true, false, false);
-                        compositeBufSizeEstimationGuaranteesSynchronousWrite(serverProvider, clientProvider,
-                                false, true, true);
-                        compositeBufSizeEstimationGuaranteesSynchronousWrite(serverProvider, clientProvider,
-                                false, true, false);
-                        compositeBufSizeEstimationGuaranteesSynchronousWrite(serverProvider, clientProvider,
-                                false, false, true);
-                        compositeBufSizeEstimationGuaranteesSynchronousWrite(serverProvider, clientProvider,
-                                false, false, false);
+                        try {
+                            compositeBufSizeEstimationGuaranteesSynchronousWrite(serverProvider, clientProvider,
+                                    true, true, true);
+                            compositeBufSizeEstimationGuaranteesSynchronousWrite(serverProvider, clientProvider,
+                                    true, true, false);
+                            compositeBufSizeEstimationGuaranteesSynchronousWrite(serverProvider, clientProvider,
+                                    true, false, true);
+                            compositeBufSizeEstimationGuaranteesSynchronousWrite(serverProvider, clientProvider,
+                                    true, false, false);
+                            compositeBufSizeEstimationGuaranteesSynchronousWrite(serverProvider, clientProvider,
+                                    false, true, true);
+                            compositeBufSizeEstimationGuaranteesSynchronousWrite(serverProvider, clientProvider,
+                                    false, true, false);
+                            compositeBufSizeEstimationGuaranteesSynchronousWrite(serverProvider, clientProvider,
+                                    false, false, true);
+                            compositeBufSizeEstimationGuaranteesSynchronousWrite(serverProvider, clientProvider,
+                                    false, false, false);
+                        } catch (Throwable cause) {
+                            throw new RuntimeException("serverProvider: " + serverProvider + " clientProvider: " +
+                                                       clientProvider, cause);
+                        }
                     }
                 }
             }
@@ -726,6 +809,9 @@ public class SslHandlerTest {
                             }
                             ch.pipeline().addLast(handler);
                             ch.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+                                private boolean sentData;
+                                private Throwable writeCause;
+
                                 @Override
                                 public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
                                     if (evt instanceof SslHandshakeCompletionEvent) {
@@ -737,7 +823,15 @@ public class SslHandlerTest {
                                                 buf.writerIndex(buf.writerIndex() + singleComponentSize);
                                                 content.addComponent(true, buf);
                                             }
-                                            ctx.writeAndFlush(content);
+                                            ctx.writeAndFlush(content).addListener(new ChannelFutureListener() {
+                                                @Override
+                                                public void operationComplete(ChannelFuture future) throws Exception {
+                                                    writeCause = future.cause();
+                                                    if (writeCause == null) {
+                                                        sentData = true;
+                                                    }
+                                                }
+                                            });
                                         } else {
                                             donePromise.tryFailure(sslEvt.cause());
                                         }
@@ -747,12 +841,14 @@ public class SslHandlerTest {
 
                                 @Override
                                 public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-                                    donePromise.tryFailure(cause);
+                                    donePromise.tryFailure(new IllegalStateException("server exception sentData: " +
+                                            sentData + " writeCause: " + writeCause, cause));
                                 }
 
                                 @Override
                                 public void channelInactive(ChannelHandlerContext ctx) {
-                                    donePromise.tryFailure(new IllegalStateException("server closed"));
+                                    donePromise.tryFailure(new IllegalStateException("server closed sentData: " +
+                                            sentData + " writeCause: " + writeCause));
                                 }
                             });
                         }
@@ -783,8 +879,19 @@ public class SslHandlerTest {
                                 }
 
                                 @Override
+                                public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
+                                    if (evt instanceof SslHandshakeCompletionEvent) {
+                                        SslHandshakeCompletionEvent sslEvt = (SslHandshakeCompletionEvent) evt;
+                                        if (!sslEvt.isSuccess()) {
+                                            donePromise.tryFailure(sslEvt.cause());
+                                        }
+                                    }
+                                }
+
+                                @Override
                                 public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-                                    donePromise.tryFailure(cause);
+                                    donePromise.tryFailure(new IllegalStateException("client exception. bytesSeen: " +
+                                                                                     bytesSeen, cause));
                                 }
 
                                 @Override

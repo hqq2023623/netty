@@ -425,7 +425,7 @@ public class DnsNameResolverTest {
     }
 
     @Test
-    public void  testResolveA() throws Exception {
+    public void testResolveA() throws Exception {
         DnsNameResolver resolver = newResolver(ResolvedAddressTypes.IPV4_ONLY)
                 // Cache for eternity
                 .ttl(Integer.MAX_VALUE, Integer.MAX_VALUE)
@@ -742,6 +742,81 @@ public class DnsNameResolverTest {
     }
 
     @Test
+    public void testCNAMEResolveAllIpv4() throws IOException, InterruptedException {
+        testCNAMERecursiveResolve(true);
+    }
+
+    @Test
+    public void testCNAMEResolveAllIpv6() throws IOException, InterruptedException {
+        testCNAMERecursiveResolve(false);
+    }
+
+    private static void testCNAMERecursiveResolve(boolean ipv4Preferred) throws IOException, InterruptedException {
+        final String firstName = "firstname.com";
+        final String secondName = "secondname.com";
+        final String lastName = "lastname.com";
+        final String ipv4Addr = "1.2.3.4";
+        final String ipv6Addr = "::1";
+        TestDnsServer dnsServer2 = new TestDnsServer(new RecordStore() {
+            @Override
+            public Set<ResourceRecord> getRecords(QuestionRecord question) throws DnsException {
+                ResourceRecordModifier rm = new ResourceRecordModifier();
+                rm.setDnsClass(RecordClass.IN);
+                rm.setDnsName(question.getDomainName());
+                rm.setDnsTtl(100);
+                rm.setDnsType(RecordType.CNAME);
+
+                if (question.getDomainName().equals(firstName)) {
+                    rm.put(DnsAttribute.DOMAIN_NAME, secondName);
+                } else if (question.getDomainName().equals(secondName)) {
+                    rm.put(DnsAttribute.DOMAIN_NAME, lastName);
+                } else if (question.getDomainName().equals(lastName)) {
+                    rm.setDnsType(question.getRecordType());
+                    switch (question.getRecordType()) {
+                        case A:
+                            rm.put(DnsAttribute.IP_ADDRESS, ipv4Addr);
+                            break;
+                        case AAAA:
+                            rm.put(DnsAttribute.IP_ADDRESS, ipv6Addr);
+                            break;
+                        default:
+                            return null;
+                    }
+                } else {
+                    return null;
+                }
+                return Collections.singleton(rm.getEntry());
+            }
+        });
+        dnsServer2.start();
+        DnsNameResolver resolver = null;
+        try {
+            DnsNameResolverBuilder builder = newResolver()
+                    .recursionDesired(true)
+                    .maxQueriesPerResolve(16)
+                    .nameServerProvider(new SingletonDnsServerAddressStreamProvider(dnsServer2.localAddress()));
+            if (ipv4Preferred) {
+                builder.resolvedAddressTypes(ResolvedAddressTypes.IPV4_PREFERRED);
+            } else {
+                builder.resolvedAddressTypes(ResolvedAddressTypes.IPV6_PREFERRED);
+            }
+            resolver = builder.build();
+            InetAddress resolvedAddress = resolver.resolve(firstName).syncUninterruptibly().getNow();
+            if (ipv4Preferred) {
+                assertEquals(ipv4Addr, resolvedAddress.getHostAddress());
+            } else {
+                assertEquals(ipv6Addr, NetUtil.toAddressString(resolvedAddress));
+            }
+            assertEquals(firstName, resolvedAddress.getHostName());
+        } finally {
+            dnsServer2.stop();
+            if (resolver != null) {
+                resolver.close();
+            }
+        }
+    }
+
+    @Test
     public void testResolveAllNullIpv4() {
         testResolveAll0(ResolvedAddressTypes.IPV4_ONLY, NetUtil.LOCALHOST4, null);
     }
@@ -971,7 +1046,7 @@ public class DnsNameResolverTest {
             if (cache) {
                 assertNull(nsCache.cache.get("io.", null));
                 assertNull(nsCache.cache.get("netty.io.", null));
-                List<DnsCacheEntry> entries = nsCache.cache.get("record.netty.io.", null);
+                List<? extends DnsCacheEntry> entries = nsCache.cache.get("record.netty.io.", null);
                 assertEquals(1, entries.size());
 
                 assertNull(nsCache.cache.get(hostname, null));
@@ -1159,7 +1234,8 @@ public class DnsNameResolverTest {
 
     private static final class TestDnsCache implements DnsCache {
         private final DnsCache cache;
-        final Map<String, List<DnsCacheEntry>> cacheHits = new HashMap<String, List<DnsCacheEntry>>();
+        final Map<String, List<? extends DnsCacheEntry>> cacheHits = new HashMap<String,
+                                                                                  List<? extends DnsCacheEntry>>();
 
         TestDnsCache(DnsCache cache) {
             this.cache = cache;
@@ -1176,22 +1252,22 @@ public class DnsNameResolverTest {
         }
 
         @Override
-        public List<DnsCacheEntry> get(String hostname, DnsRecord[] additionals) {
-            List<DnsCacheEntry> cacheEntries = cache.get(hostname, additionals);
+        public List<? extends DnsCacheEntry> get(String hostname, DnsRecord[] additionals) {
+            List<? extends DnsCacheEntry> cacheEntries = cache.get(hostname, additionals);
             cacheHits.put(hostname, cacheEntries);
             return cacheEntries;
         }
 
         @Override
-        public void cache(
+        public DnsCacheEntry cache(
                 String hostname, DnsRecord[] additionals, InetAddress address, long originalTtl, EventLoop loop) {
-            cache.cache(hostname, additionals, address, originalTtl, loop);
+            return cache.cache(hostname, additionals, address, originalTtl, loop);
         }
 
         @Override
-        public void cache(
+        public DnsCacheEntry cache(
                 String hostname, DnsRecord[] additionals, Throwable cause, EventLoop loop) {
-            cache.cache(hostname, additionals, cause, loop);
+            return cache.cache(hostname, additionals, cause, loop);
         }
     }
 

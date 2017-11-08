@@ -137,9 +137,28 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
         try {
             if (isRegistered()) {
                 // The FD will be closed, which should take care of deleting any associated events from kqueue, but
-                // since we rely upon jniSelfRef to be consistent we make sure that we clear this reference out for all]
-                // events which are pending in kqueue to avoid referencing a deleted pointer at a later time.
-                doDeregister();
+                // since we rely upon jniSelfRef to be consistent we make sure that we clear this reference out for
+                // all events which are pending in kqueue to avoid referencing a deleted pointer at a later time.
+
+                // Need to check if we are on the EventLoop as doClose() may be triggered by the GlobalEventExecutor
+                // if SO_LINGER is used.
+                //
+                // See https://github.com/netty/netty/issues/7159
+                EventLoop loop = eventLoop();
+                if (loop.inEventLoop()) {
+                    doDeregister();
+                } else {
+                    loop.execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                doDeregister();
+                            } catch (Throwable cause) {
+                                pipeline().fireExceptionCaught(cause);
+                            }
+                        }
+                    });
+                }
             }
         } finally {
             socket.close();
@@ -166,6 +185,7 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
         // Make sure we unregister our filters from kqueue!
         readFilter(false);
         writeFilter(false);
+        evSet0(Native.EVFILT_SOCK, Native.EV_DELETE, 0);
 
         ((KQueueEventLoop) eventLoop()).remove(this);
 
@@ -204,6 +224,7 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
         if (readFilterEnabled) {
             evSet0(Native.EVFILT_READ, Native.EV_ADD_CLEAR_ENABLE);
         }
+        evSet0(Native.EVFILT_SOCK, Native.EV_ADD, Native.NOTE_RDHUP);
     }
 
     @Override
@@ -330,7 +351,7 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
         return socket.isInputShutdown() && (inputClosedSeenErrorOnRead || !isAllowHalfClosure(config));
     }
 
-    final boolean isAllowHalfClosure(ChannelConfig config) {
+    private static boolean isAllowHalfClosure(ChannelConfig config) {
         return config instanceof KQueueSocketChannelConfig &&
                 ((KQueueSocketChannelConfig) config).isAllowHalfClosure();
     }
@@ -382,7 +403,11 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
     }
 
     private void evSet0(short filter, short flags) {
-        ((KQueueEventLoop) eventLoop()).evSet(this, filter, flags, 0);
+        evSet0(filter, flags, 0);
+    }
+
+    private void evSet0(short filter, short flags, int fflags) {
+        ((KQueueEventLoop) eventLoop()).evSet(this, filter, flags, fflags);
     }
 
     abstract class AbstractKQueueUnsafe extends AbstractUnsafe {
@@ -443,6 +468,14 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
          * Shutdown the input side of the channel.
          */
         void shutdownInput(boolean readEOF) {
+            // We need to take special care of calling finishConnect() if readEOF is true and we not
+            // fullfilled the connectPromise yet. If we fail to do so the connectPromise will be failed
+            // with a ClosedChannelException as a close() will happen and so the FD is closed before we
+            // have a chance to call finishConnect() later on. Calling finishConnect() here will ensure
+            // we observe the correct exception in case of a connect failure.
+            if (readEOF && connectPromise != null) {
+                finishConnect();
+            }
             if (!socket.isInputShutdown()) {
                 if (isAllowHalfClosure(config())) {
                     try {

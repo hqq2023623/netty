@@ -265,8 +265,8 @@ public abstract class ByteToMessageDecoder extends ChannelInboundHandlerAdapter 
                 callDecode(ctx, cumulation, out);
             } catch (DecoderException e) {
                 throw e;
-            } catch (Throwable t) {
-                throw new DecoderException(t);
+            } catch (Exception e) {
+                throw new DecoderException(e);
             } finally {
                 if (cumulation != null && !cumulation.isReadable()) {
                     numReads = 0;
@@ -313,18 +313,15 @@ public abstract class ByteToMessageDecoder extends ChannelInboundHandlerAdapter 
 
     @Override
     public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
-        channelReadComplete(ctx, !decodeWasNull);
-    }
-
-    protected final void channelReadComplete(ChannelHandlerContext ctx, boolean readData) throws Exception {
         numReads = 0;
         discardSomeReadBytes();
-        decodeWasNull = false;
-        if (readData) {
-            ctx.fireChannelReadComplete();
-        } else if (!ctx.channel().config().isAutoRead()) {
-            ctx.read();
+        if (decodeWasNull) {
+            decodeWasNull = false;
+            if (!ctx.channel().config().isAutoRead()) {
+                ctx.read();
+            }
         }
+        ctx.fireChannelReadComplete();
     }
 
     protected final void discardSomeReadBytes() {
@@ -458,7 +455,7 @@ public abstract class ByteToMessageDecoder extends ChannelInboundHandlerAdapter 
             }
         } catch (DecoderException e) {
             throw e;
-        } catch (Throwable cause) {
+        } catch (Exception cause) {
             throw new DecoderException(cause);
         }
     }

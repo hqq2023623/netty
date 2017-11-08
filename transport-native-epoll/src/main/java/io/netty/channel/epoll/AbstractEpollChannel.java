@@ -171,7 +171,25 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
             }
 
             if (isRegistered()) {
-                doDeregister();
+                // Need to check if we are on the EventLoop as doClose() may be triggered by the GlobalEventExecutor
+                // if SO_LINGER is used.
+                //
+                // See https://github.com/netty/netty/issues/7159
+                EventLoop loop = eventLoop();
+                if (loop.inEventLoop()) {
+                    doDeregister();
+                } else {
+                    loop.execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                doDeregister();
+                            } catch (Throwable cause) {
+                                pipeline().fireExceptionCaught(cause);
+                            }
+                        }
+                    });
+                }
             }
         } finally {
             socket.close();
@@ -220,7 +238,7 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
         return socket.isInputShutdown() && (inputClosedSeenErrorOnRead || !isAllowHalfClosure(config));
     }
 
-    final boolean isAllowHalfClosure(ChannelConfig config) {
+    private static boolean isAllowHalfClosure(ChannelConfig config) {
         return config instanceof EpollSocketChannelConfig &&
                 ((EpollSocketChannelConfig) config).isAllowHalfClosure();
     }
